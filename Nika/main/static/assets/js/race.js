@@ -1,0 +1,570 @@
+const App = {
+    delimiters: ['[[', ']]'], // Променяме синтаксиса на [[ ]]
+    data() {
+        return {
+            sysParams: {
+                id:0,
+                status: 0, // 0 - преди състезанието; 1 - Старт; 2 - състезание; 3 - след състезанието;
+                next_num:0,
+                },
+            showMode: 0, // 0 - Регистрация; 1 - Старт; 2 - Състезание; 3 - Класиране
+            startList: [],
+            groupsList: [],
+            photoList: [],
+            c_athlete: {
+                id: 1,
+                name: "Иван Петров",
+                bib_number: 88,
+                result_time: '',
+                num: 999,
+                status: 1,
+                user: 'M',
+                gender: true,
+                group: {
+                    id: 3,
+                    name: "Елит",
+                    comment: "20-40 г"
+                },
+            },
+            lookupNumber: '80',
+            filter: {
+                waitingToFinish: true,
+                disqualified: true,
+                finished: true,
+                registered: true,
+            },
+            startTime: null, // UTC timestamp от сървъра
+            serverNow: null,
+            timeOffset: 0,   // разлика между клиент и сървър
+            timerInterval: null, // таймер за хронометъра
+            timerValue: 0,   // ще показва изминалите секунди
+            updateInterval: null, //таймер за обновяване
+            updateMode:false, // режим на обновяване (false - не променя showMode; true - променя го
+            oldUpdateMode:false,
+
+            count:{
+                reg_male: 0,
+                reg_female: 0,
+                fin_male: 0,
+                fin_female: 0,
+                started_male: 0,
+                started_female: 0,
+            },
+            groupByGender: true,
+            groupByCat: true,
+            orderShow3: true,
+            final_show_mode:0 //
+
+
+        }
+    },
+
+    methods: {
+        orderShowAthlete(num){
+            let result = true
+            if ((this.startList[num].result_time === 'NS') || (this.startList[num].result_time === 'DQ')
+                || (this.startList[num].result_time === '-:--:--.-')) result = false
+            return result;
+        },
+        closeRegistration() {
+            this.updateStatus(1)
+            this.showMode = 1
+            this.toggleRightPanel()
+        },
+        closeCompetition() {
+            this.updateStatus(3)
+            this.showMode = 3
+            if (this.timerInterval) clearInterval(this.timerInterval);
+            axios({
+                method: 'POST',
+                url: '/api/athletes/disqualify/',
+                headers: {
+                    'X-CSRFToken': CSRF_TOKEN,
+                },
+            })
+                .then(response => {
+                    this.loadStartList()
+                })
+                .catch(e => alert('Грешка при прекратяване на състезанието!'));
+        },
+        toggleRightPanel() {
+            $(".popup-dashboardright-btn").toggleClass("collapsed");
+            $(".popup-dashboardright-section").toggleClass("collapsed");
+            $(".rbt-main-content").toggleClass("area-right-expanded");
+            $(".rbt-static-bar").toggleClass("area-right-expanded");
+        },
+        loadSysParams() {
+            const old_status = this.sysParams.status
+            axios.get('/api/sysparams/')
+                .then(response => {
+                    this.sysParams = response.data[0]
+                    if (old_status===this.showMode) {
+                        this.showMode = this.sysParams.status
+                    }
+                    if(this.sysParams.status === 2) { // ако е в режим "състезание"
+                       this.fetchStartTime()
+                       this.fetchPhotoList()
+                    }
+                    if(this.sysParams.status === 3) { //ако е в режим "класиране"
+                        if (this.timerInterval) clearInterval(this.timerInterval);
+                    }
+                    this.loadStartList()
+                    this.fetchPhotoList()
+                })
+                .catch(error => {
+                    console.error('Error fetching system parameters:', error);
+                });
+        },
+        loadStartList() {
+            const sk = this.showMode
+            axios.get('api/athletes/sort/' + sk + '/')
+                .then(response => {
+                    this.startList = response.data
+                    if (sk===3) this.updateGroupStats()
+                })
+                .catch(error => {
+                    console.error('Error fetching start list:', error);
+                });
+        },
+        loadGroupsList() {
+            axios.get('/api/groups/')
+                .then(response => {
+                    this.groupsList = response.data
+                })
+                .catch(error => {
+                    console.error('Error fetching groups list:', error);
+                });
+        },
+        editAthlete(num) {
+            this.c_athlete.id = this.startList[num].id
+            this.c_athlete.name = this.startList[num].name
+            this.c_athlete.bib_number = this.startList[num].bib_number
+            this.c_athlete.result_time = this.startList[num].result_time
+            this.c_athlete.num = this.startList[num].num
+            this.c_athlete.status = this.startList[num].status
+            this.c_athlete.group = this.startList[num].group
+            this.c_athlete.user = "M"
+            this.c_athlete.gender = this.startList[num].gender
+        },
+        changeGroup(idx) {
+            this.c_athlete.group = this.groupsList[idx]
+        },
+        newAthlete() {
+            this.c_athlete.id = 0
+            this.c_athlete.name = ""
+            this.c_athlete.bib_number = ""
+            this.c_athlete.result_time = "-:--:--.-"
+            this.c_athlete.num = 999
+            this.c_athlete.status = 1
+            this.c_athlete.user = 'M'
+            this.c_athlete.gender = true
+            this.c_athlete.group = this.groupsList[0]
+        },
+        saveAthlete() {
+            let payload = {
+                name: this.c_athlete.name,
+                bib_number: this.c_athlete.bib_number,
+                result_time: this.c_athlete.result_time,
+                num: this.c_athlete.num,
+                status: this.c_athlete.status,
+                group_id: this.c_athlete.group.id,
+                user: this.c_athlete.user,
+                gender: this.c_athlete.gender,
+            };
+
+            const config = {
+                headers: {'X-CSRFToken': CSRF_TOKEN}
+            };
+
+            if (this.c_athlete.id === 0) {
+                axios.post('/api/athletes/', payload, config)
+                    .then(response => {
+                        this.loadStartList();
+                        this.newAthlete();
+                    })
+                    .catch(e => {
+                        alert('Грешка при създаване!');
+                        console.error(e);
+                    });
+            } else {
+                axios.put('/api/athletes/' + this.c_athlete.id + '/', payload, config)
+                    .then(response => {
+                        this.loadStartList();
+                    })
+                    .catch(e => {
+                        alert('Грешка при редакция!');
+                        console.error(e);
+                    });
+            }
+        },
+        deleteAthlete() {
+            axios.delete('/api/athletes/' + this.c_athlete.id + '/', {
+                headers: {'X-CSRFToken': CSRF_TOKEN}
+            })
+                .then(response => {
+                    this.loadStartList();      // Обновява списъка
+                })
+                .catch(e => {
+                    alert('Грешка при изтриване!');
+                    console.error(e);
+                });
+        },
+        countAthletesInGroup(groupId) {
+            if (!this.startList) return 0;
+            return this.startList.filter(a => a.group && a.group.id === groupId).length;
+        },
+        focusDivById(id) {
+            console.log('Опитвам да фокусирам id=', id)
+            const el = document.getElementById(id);
+            if (el) {
+                el.scrollIntoView({behavior: 'smooth', block: 'center'});
+                el.classList.add('active-focus');
+                setTimeout(() => el.classList.remove('active-focus'), 1200);
+            }
+        },
+        checkAllFilters() {
+            if (this.filter.waitingToFinish && this.filter.disqualified && this.filter.finished && this.filter.registered) {
+                this.filter.waitingToFinish = false
+                this.filter.disqualified = false
+                this.filter.finished = false
+                this.filter.registered = false
+            } else {
+                this.filter.waitingToFinish = true
+                this.filter.disqualified = true
+                this.filter.finished = true
+                this.filter.registered = true
+            }
+        },
+        fetchStartTime() {
+            axios.get('/api/competition/time/')
+                .then(response => {
+                    this.startTime = new Date(response.data.start_time).getTime();
+                    this.serverNow = new Date(response.data.server_time).getTime();
+                    // Измери разликата с твоя часовник:
+                    this.timeOffset = Date.now() - this.serverNow;
+                    this.startTimerLoop();
+                });
+        },
+        startTimerLoop() {
+            if (this.timerInterval) clearInterval(this.timerInterval);
+            this.timerInterval = setInterval(() => {
+                this.timerValue = ((Date.now() - this.timeOffset) - this.startTime) / 1000;
+            }, 100); // точност до 0.1 сек
+        },
+        startUpdateLoop() {
+            if (this.updateInterval) clearInterval(this.updateInterval);
+            this.lupdateInterval = setInterval(() => {
+                this.loadSysParams();
+            }, 1000); // стартира се всяка секунда
+        },
+        startCompetition() {
+            axios({
+                method: 'POST',
+                url: '/api/competition/start/',
+                headers: {
+                    'X-CSRFToken': CSRF_TOKEN,
+                },
+            })
+                .then(response => {
+                    // Можеш да опресниш start_time от отговора:
+                    this.startTime = new Date(response.data.start_time);
+                    this.toggleRightPanel()
+                    this.updateStatus(2)
+                    this.showMode = 2
+                    this.loadStartList()
+                    this.fetchStartTime()
+                })
+                .catch(e => alert('Грешка при стартиране!'));
+        },
+        startRace() {
+            this.startCompetition()
+        },
+        formatTimer(seconds) {
+            const totalSeconds = Math.floor(seconds);
+            const deci = Math.floor((seconds - totalSeconds) * 10); // десети
+
+            const hours = Math.floor(totalSeconds / 3600);
+            const minutes = Math.floor((totalSeconds % 3600) / 60);
+            const secs = totalSeconds % 60;
+
+            // ЧЧ: без водеща, но винаги показано
+            // ММ: винаги с водеща 0
+            // СС: винаги с водеща 0
+            return `${hours}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}.${deci}`;
+        },
+        setStatus(num, value) {
+            /* Променя статуса на състезател с пореден номер num в списъка
+               Новата стойност на статуса е value
+                  -1 - не е стартирал, 0 - дисквалифициран, 1 - регистриран, 2 - финиширащ, 3 - финиширал
+            */
+            const html_id = 'r_' + this.c_athlete.bib_number
+            if (value === 2) {
+                this.incrementNextNum()
+            }
+
+            this.editAthlete(num)
+            this.c_athlete.status = value
+            if (this.c_athlete.status === 3) {
+                this.c_athlete.result_time = this.formatTimer(this.timerValue);
+                this.c_athlete.num = 0
+            } else if (this.c_athlete.status === 0) {
+                this.c_athlete.result_time = 'DQ';
+                this.c_athlete.num = 9990;
+            } else if (this.c_athlete.status === -1) {
+                this.c_athlete.result_time = 'NS';
+                this.c_athlete.num = 9999;
+            } else {
+                if (this.c_athlete.status === 1) {
+                    this.c_athlete.num = 999
+                }
+                this.c_athlete.result_time = "-:--:--.-";
+            }
+
+            if (value === 2) {
+                this.c_athlete.num = this.sysParams.next_num
+            }
+            this.saveAthlete()
+            this.focusDivById(html_id)
+
+        },
+        upEnable(num) {
+            if (num > 0) {
+                return this.startList[num].status === this.startList[num - 1].status;
+            } else {
+                return false
+            }
+        },
+        downEnable(num) {
+            if (num < (this.startList.length - 1)) {
+                return this.startList[num].status === this.startList[num + 1].status;
+            } else {
+                return false
+            }
+        },
+        updateStatus(newStatus) {
+            axios.patch(
+                '/api/competition/status/',
+                {status: newStatus},
+                {
+                    headers: { 'X-CSRFToken': CSRF_TOKEN }
+                }
+            )
+                .then(response => {
+                    this.sysParams.status = response.data.status;
+                })
+                .catch(e => {
+                    alert("Грешка при запис статуса: " + (e.response?.data?.status || "неизвестна грешка"));
+                });
+        },
+        incrementNextNum() {
+            axios({
+                method: 'POST',
+                url: '/api/competition/nextnum/inc/',
+                headers: {
+                    'X-CSRFToken': CSRF_TOKEN,
+                },
+            })
+                .then(response => {
+                    this.sysParams.next_num = response.data.next_num;
+                })
+                .catch(e => alert("Грешка при увеличаване на пореден номер: " + (e.response?.data?.detail || "неизвестна грешка")));
+
+        },
+        swapNums(idx1, idx2) {
+            let payload = {
+                id1: this.startList[idx1].id,
+                num1: this.startList[idx2].num,
+                id2: this.startList[idx2].id,
+                num2: this.startList[idx1].num
+            };
+
+            const config = {
+                headers: {'X-CSRFToken': CSRF_TOKEN}
+            };
+
+            axios.post('/api/athletes/bulk-num-update/', payload, config)
+                .then(response => {
+                    this.loadStartList();
+                    this.newAthlete();
+                })
+                .catch(e => {
+                    alert('Грешка при размяна на номерата!');
+                    console.error(e);
+                });
+        },
+        checkVisibility(num){
+            /*
+            проверка за дали даден състезател треябва да се показва в списъка според текущия филтър
+               0 - дисквалифициран, 1 - регистриран, 2 - финиширащ, 3 - финиширал
+            */
+            if (this.startList[num].status===-1) return false
+            else {
+                if (this.filter.waitingToFinish && this.filter.disqualified && this.filter.finished && this.filter.registered) {
+                    return true
+                } //всички
+                else if (this.filter.waitingToFinish && (this.startList[num].status === 2)) {
+                    return true
+                } // финиширащи
+                else if (this.filter.disqualified && (this.startList[num].status === 0)) {
+                    return true
+                } // дисквалифицирани
+                else if (this.filter.finished && (this.startList[num].status === 3)) {
+                    return true
+                } // финиширали
+                else return this.filter.registered && (this.startList[num].status === 1);
+            }
+        },
+        updateGroupStats() {
+            if (this.groupByGender){ // разделяне по мъже/жени ДА
+                if (this.groupByCat) this.final_show_mode = 0 // групиране по категории ДА
+                else this.final_show_mode = 1 // групиране по категории НЕ
+            }
+            else {// разделяне по мъже/жени НЕ
+                if (this.groupByCat) this.final_show_mode =2 // групиране по категории ДА
+                else this.final_show_mode = 3 // групиране по категории НЕ
+            }
+
+            // За всяка група – инициализирам/добавям полета reg, fin и started
+            this.groupsList.forEach(group => {
+                // Ако ги няма, добави ги, ако има – занули!
+                if (typeof group.reg_male === 'undefined') group.reg_male = 0;
+                if (typeof group.reg_female === 'undefined') group.reg_female = 0;
+                if (typeof group.fin_male === 'undefined') group.fin_male = 0;
+                if (typeof group.fin_female === 'undefined') group.fin_female = 0;
+                if (typeof group.started_male === 'undefined') group.started_male = 0;
+                if (typeof group.started_female === 'undefined') group.started_female = 0;
+
+                group.reg_male = 0;
+                group.reg_female = 0;
+                group.fin_male = 0;
+                group.fin_female = 0;
+                group.started_male = 0;
+                group.started_female = 0;
+
+                // Намери стартови номера в startList, които са от тази група
+                currentNumber = 1;
+                currentNumber_female     = 1;
+
+                this.startList.forEach(athlete => {
+                    if (athlete.group && athlete.group.id === group.id) {
+
+                        if (athlete.gender) {
+                            group.reg_male++;
+                        } // Брой записани (регистрирани) мъже
+                        else {
+                            group.reg_female++;
+                        } // Брой записани (регистрирани) жени
+                        if (athlete.status === 3) { // Брой финиширали
+                            if (athlete.gender) group.fin_male++
+                            else group.fin_female++;
+                        }
+                        if (athlete.status > -1) { // Брой стартирали
+                            if (athlete.gender) {
+                                group.started_male++
+                            }
+                            else {
+                                group.started_female++;
+                            }
+                        }
+                    }
+                });
+            });
+            if (this.final_show_mode===0) this.setRankingNums_GC()
+            else if (this.final_show_mode===1) this.setRankingNums_G()
+            else if (this.final_show_mode===2) this.setRankingNums_C()
+            else this.setRankingNums_()
+            this.countFinish()
+        },
+        setRankingNums_GC(){
+         // номерира състазателите в класирането по групи и по пол
+            let currentNumber = 1;
+            let currentNumber_female     = 1;
+            this.groupsList.forEach(group => {
+                currentNumber = 1;
+                currentNumber_female     = 1;
+                this.startList.forEach(athlete => {
+                    if (athlete.group.id === group.id) {
+                        if (athlete.gender) athlete.num = currentNumber++;
+                        else athlete.num = currentNumber_female++;
+                    }
+                })
+            })
+        },
+        setRankingNums_G(){
+         // номерира състазателите в класирането по пол
+            let currentNumber = 1;
+            let currentNumber_female     = 1;
+            this.startList.forEach(athlete => {
+                if (athlete.group.id === group.id) {
+                    if (athlete.gender) athlete.num = currentNumber++;
+                    else athlete.num = currentNumber_female++;
+                }
+            })
+        },
+        setRankingNums_(){
+         // номерира състазателите без групиране
+            let currentNumber = 1;
+            this.startList.forEach(athlete => {
+                athlete.num = currentNumber++;
+            })
+        },
+        setRankingNums_C(){
+         // номерира състазателите в класирането по групи
+            let currentNumber = 1;
+            this.groupsList.forEach(group => {
+                currentNumber = 1;
+                this.startList.forEach(athlete => {
+                    athlete.num = currentNumber++;
+                })
+            })
+        },
+        countFinish() {
+            // пресмята тоталите за статистиката
+            this.count.reg_male = 0
+            this.count.reg_female = 0
+            this.count.fin_male = 0
+            this.count.fin_female = 0
+            this.count.started_male = 0
+            this.count.started_female = 0
+            this.groupsList.forEach(group => {
+                this.count.reg_male += group.reg_male
+                this.count.reg_female += group.reg_female
+                this.count.fin_male += group.fin_male
+                this.count.fin_female += group.fin_female
+                this.count.started_male += group.started_male
+                this.count.started_female += group.started_female
+            })
+        },
+        setShowMode(value){
+            this.showMode = value;
+            this.loadStartList()
+        },
+        fetchPhotoList() {
+            axios.get('/api/athlete-photos/')
+                .then(response => {
+                    this.photoList = response.data;
+                })
+                .catch(error => {
+                    console.error("Грешка при зареждане на снимките:", error);
+                });
+        },
+        countPhotos(id) {
+            let count = 0;
+            this.photoList.forEach(photo => {
+                if (photo.athlete === id) {count += 1;}
+            })
+            return count;
+        },
+    },
+
+    created: function(){
+        this.loadSysParams()
+        this.loadGroupsList()
+        this.startUpdateLoop()
+        this.updateMode=true
+    }
+}
+
+Vue.createApp(App).mount('#main')
+
+
