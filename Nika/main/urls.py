@@ -6,6 +6,7 @@ from django.conf.urls.static import static
 
 urlpatterns = [
     path('', index, name='home'),
+
     path('api/sysparams/', SysParamListView.as_view(), name='sysparam-list'),
     path('api/groups/', GroupListView.as_view(), name='group-list'),
 
